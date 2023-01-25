@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import warnings
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -169,7 +170,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=500,
+        default=0,
         help=(
             "Save a checkpoint of the training state every X updates. These checkpoints can be used both as final"
             " checkpoints in case they are better than the last checkpoint, and are also suitable for resuming"
@@ -294,13 +295,16 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
+    parser.add_argument("--checkpointing_epochs", type=int, default=0, help="Save out a checkpoint every N epochs.")
     parser.add_argument("--samples_per_checkpoint", type=int, default=0, help="Whether or not to save samples for every checkpoint specified by --checkpointing_steps.")
     parser.add_argument("--sample_steps", type=int, default=40, help="Number of steps for generating sample images.")
     parser.add_argument("--sample_prompt", type=str, default=None, help="Prompt to use for sample image generation.")
+    parser.add_argument("--sample_negative_prompt", type=str, default="", help="Negative prompt to use for sample image generation.")
     parser.add_argument("--sample_seed", type=int, default=-1, help="Seed for the per-checkpoint sample image generation. -1 to select random seed")
     parser.add_argument("--convert_checkpoints", action="store_true", help="Auto-convert checkpoints to an inference ready structure")
     parser.add_argument("--multires", action="store_true", help="Disables dataset image transforms. Allows training on image datasets of arbitrary resolutions")
 
+    parser.add_argument("--logfile", type=str, default=None, help="File path to write logs.")
     parser.add_argument("--device", type=str, default="cuda", help="Set the device to use for training (cuda, cuda:0, cuda:1, etc.).")
 
     if input_args is not None:
@@ -501,7 +505,9 @@ def main(args):
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
+        filename=args.logfile
     )
+
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
@@ -734,6 +740,14 @@ def main(args):
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         accelerator.init_trackers("dreambooth", config=vars(args))
+    
+    # Write the training config out to a JSON file at the output directory's root
+    # Useful for keeping track of comparative training batches
+    config_out_path = os.path.join(args.output_dir, "training_config.json")
+    if not os.path.exists(config_out_path):
+        config_data = vars(args)
+        with open(config_out_path, 'w') as f:
+            json.dump(config_data, f, indent=4)
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -772,6 +786,7 @@ def main(args):
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
+        hasCheckpointed = False
         unet.train()
         if args.train_text_encoder:
             text_encoder.train()
@@ -847,7 +862,9 @@ def main(args):
                 global_step += 1
 
                 # Save checkpoint
-                if global_step % args.checkpointing_steps == 0:
+                if (args.checkpointing_steps > 0 and global_step % args.checkpointing_steps == 0) or (args.checkpointing_epochs > 0 and epoch % args.checkpointing_epochs == 0 and not hasCheckpointed):
+                    hasCheckpointed = True
+                    
                     if accelerator.is_main_process:
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
@@ -883,7 +900,8 @@ def main(args):
                                 # Generate samples
                                 with torch.cuda.amp.autocast(enabled=True):
                                     images = pipeline(
-                                        prompt=args.sample_prompt, 
+                                        prompt=args.sample_prompt,
+                                        negative_prompt=args.sample_negative_prompt,
                                         num_images_per_prompt=1,
                                         num_inference_steps=args.sample_steps,
                                         generator=sampleGenerator,
