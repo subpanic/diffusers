@@ -950,15 +950,14 @@ def main(args):
                             for sampleIdx in range(args.samples_per_checkpoint):
                                 sampleGenerator.manual_seed(sampleSeed)
                                 # Generate samples
-                                with torch.cuda.amp.autocast(enabled=True):
-                                    images = pipeline(
-                                        prompt=args.sample_prompt,
-                                        negative_prompt=args.sample_negative_prompt,
-                                        num_images_per_prompt=1,
-                                        num_inference_steps=args.sample_steps,
-                                        generator=sampleGenerator,
-                                        width=args.resolution,
-                                        height=args.resolution).images
+                                images = pipeline(
+                                    prompt=args.sample_prompt,
+                                    negative_prompt=args.sample_negative_prompt,
+                                    num_images_per_prompt=1,
+                                    num_inference_steps=args.sample_steps,
+                                    generator=sampleGenerator,
+                                    width=args.resolution,
+                                    height=args.resolution).images
 
                                 # Save samples to 'samples' folder in output directory
                                 for i, image in enumerate(images):
