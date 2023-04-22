@@ -139,7 +139,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--num_class_images",
         type=int,
-        default=100,
+        default=0,
         help=(
             "Minimal class images for prior preservation loss. If there are not enough images already present in"
             " class_data_dir, additional images will be sampled with class_prompt."
@@ -384,7 +384,8 @@ class DreamBoothDataset(Dataset):
         class_prompt=None,
         size=512,
         center_crop=False,
-        multires_enabled=False
+        multires_enabled=False,
+        num_class_images=0
     ):
         self.size = size
         self.center_crop = center_crop
@@ -403,7 +404,9 @@ class DreamBoothDataset(Dataset):
         if class_data_root is not None:
             self.class_data_root = Path(class_data_root)
             self.class_data_root.mkdir(parents=True, exist_ok=True)
-            self.class_images_path = list(self.class_data_root.iterdir())
+            sortedClassImages = sorted(self.class_data_root.iterdir())
+            maxClassImages = min(len(sortedClassImages), num_class_images) if num_class_images > 0 else len(sortedClassImages)
+            self.class_images_path = sortedClassImages[:maxClassImages]
             self.num_class_images = len(self.class_images_path)
             self._length = max(self.num_class_images, self.num_instance_images)
             self.class_prompt = class_prompt
@@ -724,7 +727,8 @@ def main(args):
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
-        multires_enabled=args.multires
+        multires_enabled=args.multires,
+        num_class_images=args.num_class_images
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -914,7 +918,7 @@ def main(args):
                 global_step += 1
 
                 # Save checkpoint
-                if (args.checkpointing_steps > 0 and global_step % args.checkpointing_steps == 0) or (args.checkpointing_epochs > 0 and epoch % args.checkpointing_epochs == 0 and not hasCheckpointed):
+                if (args.checkpointing_steps > 0 and global_step % args.checkpointing_steps == 0) or (args.checkpointing_epochs > 0 and epoch % args.checkpointing_epochs == 0 and not hasCheckpointed) or (global_step >= args.max_train_steps):
                     hasCheckpointed = True
                     
                     if accelerator.is_main_process:
@@ -926,7 +930,8 @@ def main(args):
                         if args.samples_per_checkpoint > 0:
                             # Make sure any data leftover from previous interim pipeline is cleared
                             if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
+                                with torch.cuda.device(accelerator.device):
+                                    torch.cuda.empty_cache()
                             
                             # Load current training state into a new diffusion pipeline to generate samples
                             pipeline = DiffusionPipeline.from_pretrained(
@@ -950,14 +955,15 @@ def main(args):
                             for sampleIdx in range(args.samples_per_checkpoint):
                                 sampleGenerator.manual_seed(sampleSeed)
                                 # Generate samples
-                                images = pipeline(
-                                    prompt=args.sample_prompt,
-                                    negative_prompt=args.sample_negative_prompt,
-                                    num_images_per_prompt=1,
-                                    num_inference_steps=args.sample_steps,
-                                    generator=sampleGenerator,
-                                    width=args.resolution,
-                                    height=args.resolution).images
+                                with torch.cuda.amp.autocast(enabled=True):
+                                    images = pipeline(
+                                        prompt=args.sample_prompt,
+                                        negative_prompt=args.sample_negative_prompt,
+                                        num_images_per_prompt=1,
+                                        num_inference_steps=args.sample_steps,
+                                        generator=sampleGenerator,
+                                        width=args.resolution,
+                                        height=args.resolution).images
 
                                 # Save samples to 'samples' folder in output directory
                                 for i, image in enumerate(images):
@@ -970,9 +976,12 @@ def main(args):
                             
                             # Remove interim pipeline reference
                             del pipeline
+                            if torch.cuda.is_available():
+                                with torch.cuda.device(accelerator.device):
+                                    torch.cuda.empty_cache()
 
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "epoch": epoch}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
