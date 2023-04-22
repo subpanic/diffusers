@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,11 +16,10 @@ import inspect
 from typing import Callable, List, Optional, Union
 
 import numpy as np
+import PIL
 import torch
 import torch.utils.checkpoint
-
-import PIL
-from transformers import CLIPFeatureExtractor, CLIPVisionModelWithProjection
+from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...schedulers import KarrasDiffusionSchedulers
@@ -49,7 +48,7 @@ class VersatileDiffusionImageVariationPipeline(DiffusionPipeline):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
             [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
     """
-    image_feature_extractor: CLIPFeatureExtractor
+    image_feature_extractor: CLIPImageProcessor
     image_encoder: CLIPVisionModelWithProjection
     image_unet: UNet2DConditionModel
     vae: AutoencoderKL
@@ -57,7 +56,7 @@ class VersatileDiffusionImageVariationPipeline(DiffusionPipeline):
 
     def __init__(
         self,
-        image_feature_extractor: CLIPFeatureExtractor,
+        image_feature_extractor: CLIPImageProcessor,
         image_encoder: CLIPVisionModelWithProjection,
         image_unet: UNet2DConditionModel,
         vae: AutoencoderKL,
@@ -98,7 +97,7 @@ class VersatileDiffusionImageVariationPipeline(DiffusionPipeline):
         `pipeline.enable_sequential_cpu_offload()` the execution device can only be inferred from Accelerate's module
         hooks.
         """
-        if self.device != torch.device("meta") or not hasattr(self.image_unet, "_hf_hook"):
+        if not hasattr(self.image_unet, "_hf_hook"):
             return self.device
         for module in self.image_unet.modules():
             if (
@@ -135,7 +134,7 @@ class VersatileDiffusionImageVariationPipeline(DiffusionPipeline):
             return embeds
 
         if isinstance(prompt, torch.Tensor) and len(prompt.shape) == 4:
-            prompt = [p for p in prompt]
+            prompt = list(prompt)
 
         batch_size = len(prompt) if isinstance(prompt, list) else 1
 
@@ -193,7 +192,7 @@ class VersatileDiffusionImageVariationPipeline(DiffusionPipeline):
         latents = 1 / self.vae.config.scaling_factor * latents
         image = self.vae.decode(latents).sample
         image = (image / 2 + 0.5).clamp(0, 1)
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
         return image
 
@@ -272,7 +271,7 @@ class VersatileDiffusionImageVariationPipeline(DiffusionPipeline):
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-        callback_steps: Optional[int] = 1,
+        callback_steps: int = 1,
         **kwargs,
     ):
         r"""
@@ -379,7 +378,7 @@ class VersatileDiffusionImageVariationPipeline(DiffusionPipeline):
         timesteps = self.scheduler.timesteps
 
         # 5. Prepare latent variables
-        num_channels_latents = self.image_unet.in_channels
+        num_channels_latents = self.image_unet.config.in_channels
         latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
